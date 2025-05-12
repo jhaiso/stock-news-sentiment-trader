@@ -16,6 +16,7 @@ SENTIMENT_THRESHOLD = 0.7
 minutes_back = 10
 max_news = 1
 MAX_WORKERS = 100
+TITLE_PENALTY_FACTOR = 0.85
 
 def get_latest_gainers():
     conn = sqlite3.connect(DB_FILE)
@@ -45,17 +46,32 @@ def resolve_actual_url(google_news_url):
         return google_news_url
 
 
-def analyze_article(url):
+def analyze_article(url, fallback_text=None):
     print(f"[INFO] Extracting and summarizing article: {url}")
     content = extract_main_content(url)
+    used_fallback = False
 
     if content is None:
-        print("[WARN] Content extraction failed. Skipping article.")
-        return None
+        if fallback_text:
+            print("[WARN] Content extraction failed. Using fallback title.")
+            summary = fallback_text.strip()
+            used_fallback = True
+        else:
+            print("[WARN] Content extraction failed and no fallback title provided.")
+            return None
+    else:
+        summary = content.get("summary", "").strip()
+        if not summary:
+            if fallback_text:
+                print("[WARN] No summary extracted. Using fallback title.")
+                summary = fallback_text.strip()
+                used_fallback = True
+            else:
+                print("[WARN] No summary extracted and no fallback title provided.")
+                return None
 
-    summary = content.get("summary", "").strip()
     if not summary:
-        print(f"[WARN] No summary extracted. Article length: {len(content.get('body_text', ''))} chars")
+        print("[WARN] Summary (or fallback) is empty.")
         return None
 
     results = []
@@ -74,8 +90,14 @@ def analyze_article(url):
     pos_count = sum(1 for _, s in results if s.lower() == "positive")
     majority_sentiment = "positive" if pos_count >= 2 else "negative"
 
+    if used_fallback:
+        penalty_factor = TITLE_PENALTY_FACTOR
+        print(f"[⚠️] Fallback headline used. Applying confidence penalty ({penalty_factor*100:.0f}%).")
+        avg_prob *= penalty_factor
+
     print(f"[INFO] Sentiment: {majority_sentiment} (avg prob: {avg_prob:.2f})")
-    return (avg_prob, majority_sentiment)
+    return (avg_prob, majority_sentiment, used_fallback)
+
 
 
 def save_trade_candidate(ticker, probability):
