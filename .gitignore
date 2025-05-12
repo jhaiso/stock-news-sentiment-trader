@@ -1,1 +1,4 @@
 .env
+__pycache__
+gainers.db
+potential_trades.db
