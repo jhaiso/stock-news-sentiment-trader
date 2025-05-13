@@ -106,12 +106,12 @@ def save_trade_candidate(ticker, probability):
     cur.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT,
+            ticker TEXT UNIQUE,
             probability REAL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp DATETIME DEFAULT (DATETIME('now','localtime'))
         )
     """)
-    cur.execute("INSERT INTO trades (ticker, probability) VALUES (?, ?)", (ticker, probability))
+    cur.execute("INSERT OR INTO REPLACE trades (ticker, probability) VALUES (?, ?)", (ticker, probability))
     conn.commit()
     conn.close()
     print(f"[💾] Saved {ticker} with probability {probability:.2f} to potential_trades.db")
