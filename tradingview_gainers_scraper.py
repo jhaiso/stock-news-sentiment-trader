@@ -86,9 +86,21 @@ def save_to_db(db_file, rows):
     
 def clear_db(db_file):
     conn = sqlite3.connect(db_file, timeout=30, check_same_thread=False)
-    c = conn.cursor()
+    c    = conn.cursor()
+    # ensure WAL mode
     c.execute("PRAGMA journal_mode=WAL;")
-    c.execute("DELETE FROM gainers;")  # Clear the gainers table
+
+    # check if the table "gainers" exists
+    c.execute("""
+      SELECT name FROM sqlite_master
+       WHERE type='table' AND name='gainers';
+    """)
+    if c.fetchone():
+        c.execute("DELETE FROM gainers;")
+        print("[INFO] Cleared gainers table.")
+    else:
+        print("[INFO] Table 'gainers' does not exist; nothing to clear.")
+
     conn.commit()
     conn.close()
 
