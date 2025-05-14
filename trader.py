@@ -10,9 +10,7 @@ setattr(np, "NaN", np.nan)
 import pandas_ta as ta
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import APIError
-
-# Lumibot data‐source for Alpaca
-from lumibot.data.data_sources.alpaca_data_source import AlpacaDataSource
+import requests
 
 # ── API setup ───────────────────────────────────────────────────────────────
 load_dotenv()
@@ -22,6 +20,7 @@ API_BASE   = os.environ.get(
     'APCA_API_BASE_URL',
     'https://paper-api.alpaca.markets'
 )
+TWELVE_KEY = os.environ['TWELVEDATA_API_KEY']
 api = tradeapi.REST(API_KEY, API_SECRET, API_BASE, api_version='v2')
 
 # ── Market‐data helper ─────────────────────────────────────────────────────────
@@ -31,50 +30,40 @@ def get_minute_bars(symbol: str,
                     limit:  int = 500
                    ) -> pd.DataFrame:
     """
-    Try Lumibot’s historical fetch (unlimited lookback on IEX feed).
-    If that fails, fall back to Alpaca.get_bars().
-    Returns a tz‐aware NY‐time DataFrame: [open,high,low,close,volume].
+    Fetch 1-minute bars from TwelveData between ISO start/end strings.
+    Returns a tz-aware NY-time DataFrame with columns [open,high,low,close,volume].
+    If the requested window is outside the available data, returns the last `limit` bars.
     """
-    # 1) Try Lumibot first
-    try:
-        df = lumibot_ds.get_price_history(
-            symbol     = symbol,
-            timeframe  = "1Min",
-            start_date = pd.Timestamp(start),
-            end_date   = pd.Timestamp(end),
-            limit      = limit
-        )
-        # Lumibot returns a DataFrame with a DatetimeIndex already
-        return df.tz_convert("America/New_York")
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol":     symbol,
+        "interval":   "1min",
+        "start_date": start,
+        "end_date":   end,
+        "outputsize": limit,
+        "timezone":   "America/New_York",
+        "apikey":     TWELVE_KEY,
+    }
+    r = requests.get(url, params=params).json()
+    # if window empty or error, drop dates and fetch most recent `limit` bars
+    if r.get("status") != "ok" or not r.get("values"):
+        params.pop("start_date", None)
+        params.pop("end_date",   None)
+        r = requests.get(url, params=params).json()
+        if r.get("status") != "ok" or not r.get("values"):
+            return pd.DataFrame(columns=["open","high","low","close","volume"])
 
-    except Exception as e:
-        print(f"[WARN] Lumibot failed ({e}), falling back to Alpaca…")
-
-    # 2) Fallback: Alpaca.get_bars (still limited to last 15 min on free tier)
-    syms = [symbol]
-    try:
-        raw = api.get_bars(
-            syms,
-            tradeapi.TimeFrame.Minute,
-            start=start,
-            end=end,
-            limit=limit,
-            feed="iex"
-        ).df
-    except APIError as e:
-        print(f"[WARN] Alpaca.get_bars failed for {symbol}: {e}")
-        return pd.DataFrame(columns=["open","high","low","close","volume"])
-
-    if raw.empty:
-        return raw
-
-    # strip off MultiIndex if present
-    if isinstance(raw.index, pd.MultiIndex):
-        df = raw.xs(symbol, level=0)
-    else:
-        df = raw
-
-    return df.tz_convert("America/New_York")
+    df = pd.DataFrame(r["values"])[::-1]
+    df.index = pd.to_datetime(df["datetime"]) \
+                  .dt.tz_localize("America/New_York")
+    df = df.rename(columns={
+        "open":   "open",
+        "high":   "high",
+        "low":    "low",
+        "close":  "close",
+        "volume": "volume"
+    })[["open","high","low","close","volume"]]
+    return df
 
 # ── Indicators & entry signal ─────────────────────────────────────────────────
 def compute_indicators(df):
@@ -92,7 +81,6 @@ def entry_signal(symbol, df):
       4) RSI14 < 70
     """
     last = df.iloc[-1]
-
     # ── fetch the last two daily bars with v2 get_bars ──────────────────────────
     end_d   = pd.Timestamp.now(tz='America/New_York')
     start_d = (end_d - pd.Timedelta(days=2)).isoformat()
@@ -107,39 +95,32 @@ def entry_signal(symbol, df):
     except APIError as e:
         print(f"[WARN] Couldn't fetch daily bars for {symbol}: {e}")
         return False
-
     # slice out symbol if MultiIndex
     if isinstance(raw_day.index, pd.MultiIndex):
         day_df = raw_day.xs(symbol, level=0)
     else:
         day_df = raw_day
-
     # pick yesterday's high
     today_floor = end_d.floor('D')
     if last.name.floor('D') == today_floor:
-        y_high = day_df['high'].iloc[-2]  # bar from the prior day
+        y_high = day_df['high'].iloc[-2]
     else:
         y_high = day_df['high'].iloc[-1]
-
     if last.close <= y_high:
         return False
-
     # volume filter
     vol20 = df['volume'].rolling(20).mean().iloc[-1]
     if last.volume < 1.5 * vol20:
         return False
-
     # pullback test
     window = df.tail(5)
     pb_ok = ((window['close'] - window['vwap']).abs().min() < 0.003 * last.close) \
          or ((window['close'] - window['ema5']).abs().min() < 0.003 * last.close)
     if not pb_ok:
         return False
-
     # RSI
     if last.rsi14 >= 70:
         return False
-
     return True
 
 # ── Position sizing (example) ───────────────────────────────────────────────
@@ -165,12 +146,10 @@ def submit_split_exit(symbol: str,
         o = api.get_order(order.id)
         if o.filled_avg_price:
             entry_price = float(o.filled_avg_price)
-
     stop_price   = round(entry_price * (1 - stop_pct), 2)
     target_price = round(entry_price * (1 + stop_pct * rr), 2)
     half_qty     = qty // 2
     trail_qty    = qty - half_qty
-
     api.submit_order(
         symbol=symbol,
         qty=half_qty,
@@ -182,7 +161,6 @@ def submit_split_exit(symbol: str,
     print(f"→ {symbol}: Bought {qty} @ {entry_price:.2f}, "
           f"placed limit‐sell {half_qty} @ {target_price:.2f}, "
           f"hard stop @ {stop_price:.2f}")
-
     def _trail_exit():
         current_stop = stop_price
         print(f"🔄 Starting EMA({ema_len}) trail for {trail_qty} shares of {symbol}")
@@ -207,7 +185,6 @@ def submit_split_exit(symbol: str,
                 )
                 break
             time.sleep(10)
-
     t = threading.Thread(target=_trail_exit, daemon=True)
     t.start()
 
@@ -226,12 +203,10 @@ if __name__ == "__main__":
                    default=None,
                    help="End timestamp (ISO) — default=now NY")
     args = p.parse_args()
-
     end = (pd.Timestamp.now(tz="America/New_York")
            if args.end is None
            else pd.Timestamp(args.end))
     start = end - pd.Timedelta(minutes=args.minutes)
-
     print(f"\n→ Fetching {args.symbol} from {start.isoformat()} to {end.isoformat()} …")
     df = get_minute_bars(
         args.symbol,
@@ -239,7 +214,6 @@ if __name__ == "__main__":
         end.isoformat(),
         limit=args.minutes
     )
-
     if df.empty:
         print("→ got NO data back (empty DataFrame).")
     else:
