@@ -123,9 +123,48 @@ def entry_signal(symbol, df):
         return False
     return True
 
-# ── Position sizing (example) ───────────────────────────────────────────────
-def size_position(symbol, dollar_risk=100):
-    return 10
+# ── Position sizing (risk‐based) ─────────────────────────────────────────
+def size_position(symbol: str,
+                  risk_pct: float = 0.02,
+                  stop_pct: float = 0.02
+                 ) -> int:
+    """
+    Buy a number of shares so that if the trade stops out at stop_pct
+    below entry, you lose no more than risk_pct of your account cash.
+    """
+    # 1) How much cash do we have?
+    acct = api.get_account()
+    cash = float(acct.cash)
+
+    # 2) Risk budget in dollars
+    risk_amount = cash * risk_pct
+    if risk_amount < 1:
+        return 0
+
+    # 3) Estimate entry price
+    try:
+        last_trade = api.get_last_trade(symbol)
+        entry_price = float(last_trade.price)
+    except Exception:
+        # fallback to last bar close
+        df = get_minute_bars(
+            symbol,
+            (datetime.now(TZ_NY) - timedelta(minutes=5)).isoformat(),
+            datetime.now(TZ_NY).isoformat(),
+            limit=2
+        )
+        if df.empty:
+            return 0
+        entry_price = float(df['close'].iloc[-1])
+
+    # 4) risk per share
+    share_risk = entry_price * stop_pct
+    if share_risk <= 0:
+        return 0
+
+    # 5) compute qty
+    qty = int(risk_amount / share_risk)
+    return max(qty, 0)
 
 # ── Split‐exit order logic ───────────────────────────────────────────────────
 def submit_split_exit(symbol: str,
@@ -161,21 +200,39 @@ def submit_split_exit(symbol: str,
     print(f"→ {symbol}: Bought {qty} @ {entry_price:.2f}, "
           f"placed limit‐sell {half_qty} @ {target_price:.2f}, "
           f"hard stop @ {stop_price:.2f}")
+    
     def _trail_exit():
         current_stop = stop_price
         print(f"🔄 Starting EMA({ema_len}) trail for {trail_qty} shares of {symbol}")
+
+        # 1) prime with an initial chunk of data
+        now0   = datetime.now(tz=pd.Timestamp.now().tz)
+        start0 = now0 - timedelta(minutes=ema_len * 10)
+        local_df = get_minute_bars(
+            symbol,
+            start0.isoformat(),
+            now0.isoformat()
+        )
+
         while True:
-            now   = datetime.now(tz=pd.Timestamp.now().tz)
-            start = now - timedelta(minutes=ema_len * 10)
-            df    = get_minute_bars(symbol, start.isoformat(), now.isoformat())
-            if df.shape[0] < ema_len:
-                time.sleep(5)
-                continue
-            ema_val = ta.ema(df['close'], length=ema_len).iloc[-1]
-            last_px = df['close'].iloc[-1]
-            if last_px < ema_val or last_px < current_stop:
-                reason = "EMA" if last_px < ema_val else "STOP"
-                print(f"⚠️  Trail exit: {symbol} at {last_px:.2f} (broke {reason})")
+            # 2) sleep until the next full-minute boundary
+            now = datetime.now(tz=local_df.index.tz)
+            next_min = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+            time.sleep(max((next_min - now).total_seconds(), 0))
+
+            # 3) fetch only the newest bar (last 1 minute)
+            bar = get_minute_bars(
+                symbol,
+                (next_min - timedelta(minutes=1)).isoformat(),
+                next_min.isoformat(),
+                limit=2
+            )
+
+            # — if no new data, exit at last known price —
+            if bar.empty:
+                last_px = local_df['close'].iloc[-1]
+                print(f"⚠️ No new bars for {symbol}. "
+                      f"Selling {trail_qty} @ last known {last_px:.2f}")
                 api.submit_order(
                     symbol=symbol,
                     qty=trail_qty,
@@ -184,10 +241,30 @@ def submit_split_exit(symbol: str,
                     time_in_force='day'
                 )
                 break
-            time.sleep(10)
+
+            # 4) append and optionally trim history
+            local_df = pd.concat([local_df, bar])
+            if len(local_df) > ema_len * 20:
+                local_df = local_df.iloc[-ema_len * 20 :]
+
+            # 5) recompute EMA and check exit conditions
+            ema_val = ta.ema(local_df['close'], length=ema_len).iloc[-1]
+            last_px = local_df['close'].iloc[-1]
+            if last_px < ema_val or last_px < current_stop:
+                reason = "EMA" if last_px < ema_val else "STOP"
+                print(f"⚠️ Trail exit: {symbol} at {last_px:.2f} (broke {reason})")
+                api.submit_order(
+                    symbol=symbol,
+                    qty=trail_qty,
+                    side='sell',
+                    type='market',
+                    time_in_force='day'
+                )
+                break
+
     t = threading.Thread(target=_trail_exit, daemon=True)
     t.start()
-
+    
 # ── CLI smoke‐test for get_minute_bars ─────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
