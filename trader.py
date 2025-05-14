@@ -11,6 +11,11 @@ import pandas_ta as ta
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import APIError
 import requests
+import pytz
+
+
+# Define TZ_NY timezone object
+TZ_NY = pytz.timezone('America/New_York')
 
 # ── API setup ───────────────────────────────────────────────────────────────
 load_dotenv()
@@ -112,7 +117,7 @@ def entry_signal(symbol, df):
     vol20 = df['volume'].rolling(20).mean().iloc[-1]
     if last.volume < 1.5 * vol20:
         return False
-    # pullback test
+    # pullback test TODO: ENSURE THAT THE PULLBACK IS ABOVE VWAP OR EMA5 OR PULLBACK TO HIGH OF DAY???
     window = df.tail(5)
     pb_ok = ((window['close'] - window['vwap']).abs().min() < 0.003 * last.close) \
          or ((window['close'] - window['ema5']).abs().min() < 0.003 * last.close)

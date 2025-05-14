@@ -76,7 +76,7 @@ def run_trader():
                                   qty,
                                   stop_pct=STOP_PCT_PER_TRADE)
             else:
-                print(f"[{symbol}] not enough cash to size a {risk_pct*100:.1f}% risk trade.")
+                print(f"[{symbol}] not enough cash to size a {RISK_PCT_PER_TRADE*100:.1f}% risk trade.")
         else:
             print(f"[{symbol}] no entry signal.")
 

@@ -8,7 +8,6 @@ from article_sentiment import extract_main_content
 from finbert_utils import estimate_sentiment as finbert_sentiment
 from llama_utils import estimate_sentiment as llama_sentiment
 from gpt_utils import estimate_sentiment as gpt_sentiment
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 DB_FILE           = "gainers.db"
 TRADE_DB_FILE     = "potential_trades.db"
@@ -19,7 +18,6 @@ MAX_WORKERS       = 100
 TITLE_PENALTY_FACTOR = 0.85
 
 def init_url_cache(db_file=TRADE_DB_FILE):
-    """Create a table to remember which URLs we've already analyzed and their scores."""
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
     c.execute("""
@@ -42,7 +40,6 @@ def has_url_been_analyzed(db_file, url):
     return found
 
 def get_cached_sentiment(db_file, url):
-    """Return (probability, sentiment) tuple for a URL previously analyzed."""
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
     c.execute("SELECT probability, sentiment FROM analyzed_urls WHERE url = ?", (url,))
@@ -51,7 +48,6 @@ def get_cached_sentiment(db_file, url):
     return (row[0], row[1]) if row else None
 
 def mark_url_as_analyzed(db_file, url, probability, sentiment):
-    """Store URL + its sentiment in the cache (INSERT OR REPLACE)."""
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
     c.execute("""
@@ -171,69 +167,60 @@ def fetch_news_for_company(row):
     return (ticker, company, news)
 
 def process_articles_for_ticker(ticker: str, articles: list):
-    """
-    For a given ticker & its list of news‐dicts:
-      - Resolve each URL
-      - If seen before, fetch cached (prob, sentiment)
-      - Otherwise do analyze_article(), then cache the result
-      - Collect all probabilities, average them, and save_trade_candidate if >= threshold
-    """
     def _analyze_one(art):
         raw_url = art.get("link")
         title   = art.get("title", "")
         url     = resolve_actual_url(raw_url)
 
-        # 1) cache?
         if has_url_been_analyzed(TRADE_DB_FILE, url):
             prob, sent = get_cached_sentiment(TRADE_DB_FILE, url)
             print(f"   ↳ [cache] {url}: {prob:.2f} {sent}")
-            return prob
+            return prob, sent
 
-        # 2) do the heavy work
         res = analyze_article(url, fallback_text=title)
         if not res:
             return None
+
         prob, sent, _ = res
-
-        # 3) write back to SQLite
         mark_url_as_analyzed(TRADE_DB_FILE, url, prob, sent)
-        return prob
+        return prob, sent
 
-    # 4) launch threads
     probs = []
+    sentiments = []
     with ThreadPoolExecutor(max_workers=8) as exe:
         futures = {exe.submit(_analyze_one, art): art for art in articles}
         for fut in as_completed(futures):
-            p = fut.result()
-            if p is not None:
-                probs.append(p)
+            result = fut.result()
+            if result:
+                prob, sent = result
+                probs.append(prob)
+                sentiments.append(sent)
 
-    # 5) average & decide
     if not probs:
         print(f"[INFO] {ticker} no usable sentiment data.")
         return
 
     avg_prob = sum(probs) / len(probs)
-    print(f"[INFO] {ticker}: averaged prob = {avg_prob:.2f}")
+    pos_count = sum(1 for s in sentiments if s.lower() == "positive")
+    majority_sent = "positive" if pos_count >= 2 else "negative"
 
-    if avg_prob >= SENTIMENT_THRESHOLD:
+    print(f"[INFO] {ticker}: averaged prob = {avg_prob:.2f}, sentiment = {majority_sent}")
+
+    if avg_prob >= SENTIMENT_THRESHOLD and majority_sent == "positive":
         save_trade_candidate(ticker, avg_prob)
     else:
-        print(f"[INFO] {ticker} below threshold ({avg_prob:.2f} < {SENTIMENT_THRESHOLD})")
+        print(f"[INFO] {ticker} did not meet sentiment requirements "
+              f"({avg_prob:.2f}, sentiment: {majority_sent})")
 
 if __name__ == "__main__":
-    # 0) make sure our cache table exists
     init_url_cache(TRADE_DB_FILE)
 
-    # 1) scrape TradingView
     print("🔄 Running TradingView scraper...")
     run_scraper_pipeline()
 
-    # 2) load gainers
     print("\n🗂️ Fetching latest gainers from database...")
     rows = get_latest_gainers()
 
-    # 3) fetch & process news in parallel
     print(f"\n🚀 Searching Google News for {len(rows)} companies using {MAX_WORKERS} threads…\n")
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
@@ -246,5 +233,4 @@ if __name__ == "__main__":
                 continue
 
             print(f"\n🔍 {company} ({ticker})")
-            # single call handles caching, analysis, averaging & saving
             process_articles_for_ticker(ticker, news)
