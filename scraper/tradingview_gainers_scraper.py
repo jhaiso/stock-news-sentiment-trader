@@ -10,8 +10,6 @@ Returns:
     
 """
 
-# gainer_scraper.py
-
 import sqlite3
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
