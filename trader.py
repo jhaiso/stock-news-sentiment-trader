@@ -68,6 +68,15 @@ def get_minute_bars(symbol: str,
         "close":  "close",
         "volume": "volume"
     })[["open","high","low","close","volume"]]
+
+    # convert strings from JSON into numeric for computations
+    df = df.astype({
+    "open": float,
+    "high": float,
+    "low": float,
+    "close": float,
+    "volume": float,
+    })
     return df
 
 # ── Indicators & entry signal ─────────────────────────────────────────────────
