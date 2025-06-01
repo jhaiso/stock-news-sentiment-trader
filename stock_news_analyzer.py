@@ -2,7 +2,7 @@ import sqlite3
 import requests
 from googlenewsdecoder import gnewsdecoder
 from tradingview_gainers_scraper import run_scraper_pipeline
-from google_search import fetch_google_news_feed_sorted
+from sentiment.google_search import fetch_google_news_feed_sorted
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from article_sentiment import extract_main_content
 from finbert_utils import estimate_sentiment as finbert_sentiment
